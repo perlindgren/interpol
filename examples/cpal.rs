@@ -151,11 +151,9 @@ fn main() -> anyhow::Result<()> {
     input_stream.play()?;
     output_stream.play()?;
 
-    let mut counter = LENGTH;
-
     const FS: usize = 48000;
-    const LENGTH: usize = 10000;
-    const OVER_SAMPLING: usize = 10;
+    const CHUNK: usize = 500;
+    const OVER_SAMPLING: usize = 20;
 
     let length = FS * OVER_SAMPLING;
 
@@ -167,36 +165,80 @@ fn main() -> anyhow::Result<()> {
     // create a FFT
     let r2c = real_planner.plan_fft_forward(length);
     // make a dummy real-valued signal (filled with zeros)
-    let mut indata = r2c.make_input_vec();
+    let mut fft_in_data = [0.0f32; FS * OVER_SAMPLING];
+    let mut in_buffer = [0.0f32; FS];
+    let mut in_ptr = FS - CHUNK;
 
     // make a vector for storing the spectrum
     let mut spectrum = r2c.make_output_vec();
+    let mut scratch = spectrum.clone();
+
+    let note_hz = [
+        82.41,  // Hz Low E (6th string)
+        110.00, //  Hz A (5th string)
+        146.83, //  Hz D (4th string)
+        196.00, // Hz G (3rd string)
+        246.94, // Hz B (2nd string)
+        329.63, // Hz High E (1st string)
+    ];
 
     loop {
         if let Some(s) = consumer2.try_pop() {
-            // populate indata
-            counter -= 1;
-            indata[LENGTH - counter] = s;
-            if counter == 0 {
-                counter = LENGTH;
+            // populate in_data
+
+            in_buffer[in_ptr] = s;
+            in_ptr += 1;
+            if in_ptr == FS {
+                in_ptr = FS - CHUNK;
 
                 // hann filter
-                hann_window_in_place(&mut indata[0..LENGTH]);
+                hann_window_in_place(&mut fft_in_data[0..FS]);
                 // forward transform the signal
-                r2c.process(&mut indata, &mut spectrum).unwrap();
+                fft_in_data[0..FS].copy_from_slice(&in_buffer[..]);
+                fft_in_data[FS..].iter_mut().for_each(|d| *d = 0.0);
 
-                let max = spectrum[0..1000 * 10]
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
-                    .map(|(index, _)| index)
+                r2c.process_with_scratch(&mut fft_in_data, &mut spectrum, &mut scratch)
                     .unwrap();
 
-                let cents = 1200.0 * (max as f32 / 824.0).log2();
-                println!("max {}, \tcents {}", max, cents);
-                for v in indata.iter_mut() {
-                    *v = 0.0
+                // find fundamental
+                const THRESHOLD: f32 = 6.0;
+
+                let mut best_abs = 0.0;
+                let mut best_index = 0;
+                for (index, bin_value) in spectrum[0..500 * OVER_SAMPLING].iter().enumerate() {
+                    let abs = bin_value.abs();
+
+                    // if (index - best_index < 5 && abs > best_abs) || abs > THRESHOLD * best_abs {
+                    //     best_abs = abs;
+                    //     best_index = index;
+                    // }
+                    if abs > best_abs {
+                        best_abs = abs;
+                        best_index = index;
+                    }
                 }
+
+                let fundamental_freq = best_index as f32 / OVER_SAMPLING as f32;
+
+                // find matching string
+                let mut best_index = 0;
+                let mut best_diff = 1000.0;
+                for (index, freq) in note_hz.iter().enumerate() {
+                    let diff = (fundamental_freq - *freq).abs();
+                    if diff < best_diff {
+                        best_index = index;
+                        best_diff = diff;
+                    }
+                }
+
+                let target_freq = note_hz[best_index];
+
+                let cents = 1200.0 * (fundamental_freq / target_freq).log2();
+                println!(
+                    "string #{}, \tfreq {} \tfreq {:.2} \tcents {:.2}",
+                    best_index, target_freq, fundamental_freq, cents
+                );
+                in_buffer.copy_within(CHUNK.., 0);
             }
         }
     }

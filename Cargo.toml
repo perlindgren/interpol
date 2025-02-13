@@ -10,3 +10,6 @@ clap = { version = "4.5.29", features = ["derive"] }
 realfft = "3.4.0"
 ringbuf = "0.4.7"
 rustfft = "6.2.0"
+egui = "0.31.0"
+env_logger = "0.11.6"
+eframe = "0.31.0"
